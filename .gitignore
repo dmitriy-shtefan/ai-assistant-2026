@@ -1,0 +1,5 @@
+.idea
+.venv
+~*.pptx
+.DS_Store
+*/__py_cache__/*
