@@ -28,9 +28,73 @@ DEFAULT_PERSONA = {
 current = DEFAULT_PERSONA
 TAG_RULE = (
     "Починай кожну відповідь тегом емоції в квадратних дужках: [happy], [sad] "
-    "або [neutral], а далі — текст відповіді."
+    "або [neutral], а далі - текст відповіді."
 )
 PERSONAS = {}
+history = []
+MAX_HISTORY = 10
+MAX_NOTES = 20
+memory = {"name": "", "notes": []}
+
+
+def load_memory(path="user.json"):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"name": "", "notes": []}
+    name = data.get("name", "") if isinstance(data, dict) else ""
+    notes = data.get("notes", []) if isinstance(data, dict) else []
+    if not isinstance(name, str) or not isinstance(notes, list):
+        return {"name": "", "notes": []}
+    return {"name": name, "notes": [str(n) for n in notes][-MAX_NOTES:]}
+
+
+def save_memory(path="user.json"):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(memory, f, ensure_ascii=False, indent=2)
+
+
+def memory_text():
+    parts = []
+    if memory["name"]:
+        parts.append(f"Користувача звати {memory['name']}.")
+    if memory["notes"]:
+        parts.append("Користувач просив запам'ятати: " + "; ".join(memory["notes"]) + ".")
+    return " ".join(parts)
+
+
+def handle_command(text):
+    low = text.lower().strip()
+    if low.startswith("мене звати "):
+        memory["name"] = text.strip()[len("мене звати "):].strip()[:30]
+        save_memory()
+        return f"Приємно познайомитись, {memory['name']}!"
+    if low.startswith("запам'ятай ") or low.startswith("запамʼятай "):
+        note = text.strip().split(maxsplit=1)[1][:100]
+        memory["notes"] = (memory["notes"] + [note])[-MAX_NOTES:]
+        save_memory()
+        return "Записано: " + note
+    if low in ("мої нотатки", "нотатки"):
+        if not memory["notes"]:
+            return "Нотаток поки немає."
+        return "Нотатки: " + "; ".join(f"{i}) {n}" for i, n in enumerate(memory["notes"], 1))
+    if low in ("забудь все", "забудь усе"):
+        memory.update({"name": "", "notes": []})
+        history.clear()
+        save_memory()
+        return "Готово, пам'ять очищено."
+    if low in ("допомога", "help"):
+        return "Команди: мене звати ...; запам'ятай ...; мої нотатки; забудь все."
+    return None
+
+
+def add_message(role, text):
+    history.append({"role": role, "content": text})
+    del history[:-MAX_HISTORY]
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+
 
 def load_personas(path="personas.json"):
     with open(path, "r", encoding="utf-8") as file:
@@ -39,13 +103,15 @@ def load_personas(path="personas.json"):
     return {p["id"]: p for p in items}
 
 
-
 def build_system_prompt(persona):
-    return (
-        f"Ти — АІДА, AI-помічник у ролі: {persona['role']}. "
+    base = (
+        f"Ти - АІДА, AI-помічник у ролі: {persona['role']}. "
         f"Стиль: {persona['style']}. Любиш вживати: {', '.join(persona['lexicon'])}. "
-        f"Табу: {persona['taboo']}. Відповідай у 1–3 реченнях. {TAG_RULE}"
+        f"Табу: {persona['taboo']}. Відповідай у 1-3 реченнях. {TAG_RULE}"
     )
+
+    mem = memory_text()
+    return base + (" " + mem if mem else "")
 
 
 def find_persona(name):
@@ -82,14 +148,19 @@ def parse_reply(raw):
 
 def ask_ai(question):
     messages = [
-        {"role": "system", "content": build_system_prompt(current)},
-        {"role": "user", "content": question}
-    ]
+        {"role": "system", "content": build_system_prompt(current)}
+    ] + history + [{"role": "user", "content": question}]
     data = {"model": "gpt-6-luna", "messages": messages}
     r = requests.post(URL, headers=HEAD, json=data)
     if r.status_code != 200:
         return "Помилка. Код: " + str(r.status_code)
-    return r.json()["choices"][0]["message"]["content"]
+    text = r.json()["choices"][0]["message"]["content"]
+    if not isinstance(text, str):
+        return "Помилка: API повернув відповідь без тексту."
+
+    add_message("user", question)
+    add_message("assistant", text)
+    return text
 
 
 def set_emotion(name):
@@ -111,6 +182,12 @@ def on_click():
 
 
 def reply(question):
+    text = handle_command(question)
+    if text is not None:
+        set_emotion("happy")
+        answer.config(text=text)
+        return
+
     text = ask_ai(question)
     emotion, text = parse_reply(text)
     answer.config(text=text)
@@ -129,6 +206,8 @@ window = tk.Tk()
 window.title("АІДА")
 
 PERSONAS.update(load_personas())
+current = PERSONAS.get("friend", DEFAULT_PERSONA)
+memory.update(load_memory())
 
 titles = [p["title"] for p in PERSONAS.values()]
 persona_var = tk.StringVar(value=current["title"])
